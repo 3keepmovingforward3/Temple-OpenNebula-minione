@@ -2,6 +2,13 @@
 
 **miniONE** is an easy to use deployment tool to build an evaluation OpenNebula cloud based on either virtual machines (KVM) or system containers (LXD). All necessary components to manage and run the virtual machines or containers are installed and configured on your dedicated system with just a single command run.
 
+## tl;dr  
+Run command:  
+```
+wget 'https://github.com/OpenNebula/minione/releases/latest/download/minione'
+sudo bash minione
+```
+
 ## Requirements
 
 Common min. requirements:

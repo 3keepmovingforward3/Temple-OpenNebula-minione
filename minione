@@ -17,7 +17,7 @@
 #--------------------------------------------------------------------------- #
 
 # default parameters values
-VERSION='5.8'
+VERSION='5.10'
 FORCE='no'
 VERBOSE='no'
 ASK='yes'
@@ -30,7 +30,7 @@ VNET_NETMASK='255.255.255.0'
 VNET_GATEWAY='172.16.100.1'
 VNET_AR_IP_START='172.16.100.2'
 VNET_AR_IP_COUNT='100'
-MARKET_APP_NAME='CentOS 7 - KVM'
+MARKET_APP_NAME='CentOS 7'
 VM_PASSWORD='opennebula'
 LXD='no'
 SUNSTONE_PORT='80'
@@ -66,7 +66,7 @@ usage() {
     e "--ssh-pubkey [~/.ssh/id_rsa.pub]"          "User ssh public key"
     e "--vm-password [${VM_PASSWORD}]"            "Root password for virtual machine"
     e "--sunstone-port [${SUNSTONE_PORT}]"        "Setup sunstone port"
-    e "--marketapp-name [CentOS 7 - KVM]"         "Name of Marketplace appliance to import"
+    e "--marketapp-name [${MARKET_APP_NAME}]"     "Name of Marketplace appliance to import"
     e ""
     e "--bridge-interface [${BRIDGE_INTERFACE}]"  "Bridge interface for private networking"
     e "--nat-interface [first net device]"        "Interface to configure for NAT"
@@ -113,8 +113,12 @@ fi
 eval set -- "$OPTS"
 
 # global vars
-SUPPORTED_MAP='^(CentOS7 5.6|CentOS7 5.8|Debian9 5.8|Ubuntu16.04 5.8|Ubuntu18.04 5.8|Ubuntu18.10 5.8)$'
-SUPPORTED_LXD_MAP='^(Ubuntu18.04 5.8)$'
+SUPPORTED_MAP='^(CentOS7 5.6|CentOS7 5.8|CentOS7 5.10|'
+SUPPORTED_MAP+='Debian9 5.8|Debian9 5.10|'
+SUPPORTED_MAP+='Ubuntu16.04 5.8|Ubuntu16.04 5.10|'
+SUPPORTED_MAP+='Ubuntu18.04 5.8|Ubuntu18.04 5.10|'
+SUPPORTED_MAP+='Ubuntu18.10 5.8|Ubuntu18.10 5.10)$'
+SUPPORTED_LXD_MAP='^(Ubuntu18.04 5.8|Ubuntu18.04 5.10)$'
 PURGE='no'
 DISABLE_SELINUX='no'
 ENABLED_APPARMOR='no'
@@ -196,6 +200,7 @@ if [[ $EDGE = packet ]]; then
     EXIT=0
     [[ -z "$EDGE_PACKET_TOKEN" ]] && { echo "--edge-packet-token required"; EXIT=1; }
     [[ -z "$EDGE_PACKET_PROJECT" ]] && { echo "--edge-packet-project required"; EXIT=1; }
+    [[ "$VERSION" != "5.10" ]] && { echo "Edge deployment only for 5.10"; EXIT=1; }
     [[ $EXIT != 0 ]] && exit $EXIT
 fi
 
@@ -294,6 +299,7 @@ check() {
     local TEXT=$2
     local TRIES=${3:-1}
     local ON_FAIL=$4
+    local HINT=$5
     local STDERR_TMP_FILE
     local STDOUT_TMP_FILE
     local RC=1
@@ -329,7 +335,11 @@ check() {
             return ${RC}
         elif [[ ${FORCE} = 'no' && -n "${ON_FAIL}" ]]; then
             red "FAILED"
-            echo 'Consider running with "--force" to override'
+            if [[ -n "${HINT}" ]]; then
+                echo "${HINT}"
+            else
+                echo 'Consider running with "--force" to override'
+            fi
             exit 1
         elif [[ ${FORCE} = 'yes' && "${ON_FAIL}" =~ "IGNORE" ]]; then
             orange "${ON_FAIL}"
@@ -692,11 +702,16 @@ install_ruby_gems() {
         install redhat-lsb || return 1
         gem install bundler --version '<2.0' >/dev/null || return 1
     }
+
+    debian && {
+        apt-get -q -y install libssl-dev || return 1
+    }
+
     OUT=$(mktemp)
     export DEBIAN_FRONTEND=noninteractive
     /usr/share/one/install_gems --yes > "$OUT"
-    unset DEBIAN_FRONTEND
     RC=$?
+    unset DEBIAN_FRONTEND
     grep 'Could not' <"$OUT" >&2
     return $RC
 }
@@ -829,6 +844,30 @@ validate_packet() {
         return 1
     fi
 }
+
+validate_packet_plan_facility() {
+    URL="/projects/$EDGE_PACKET_PROJECT/plans/"
+    DATA=$(packet_req "$URL")
+    AVAILABLE_FACILITY_IDS=$(echo "$DATA" | jq -r ".plans | .[] | select(.name==\"$EDGE_PACKET_PLAN.x86\") | .\"available_in\" | .[] | .href" | awk -F/ '{print $3}')
+    if [ -z "$AVAILABLE_FACILITY_IDS" ]; then
+        echo "Can not list Packet project plans"
+        return 1
+    fi
+
+    URL="/projects/$EDGE_PACKET_PROJECT/facilities/"
+    DATA=$(packet_req "$URL")
+    REQUIRED_FACILITY_ID=$(echo "$DATA" |jq -r ".facilities | .[] | select(.code==\"$EDGE_PACKET_FACILITY\") | .id")
+    if [ -z "$REQUIRED_FACILITY_ID" ]; then
+        echo "Can not list Packet project facilities"
+        return 1
+    fi
+
+    if [[ ! $AVAILABLE_FACILITY_IDS =~ $REQUIRED_FACILITY_ID ]]; then
+        echo "Required Packet plan($EDGE_PACKET_PLAN) is not available in facility($EDGE_PACKET_FACILITY)"
+        return 1
+    fi
+}
+
 
 #-------------------------------------------------------------------------------
 # Checks & detection
@@ -971,14 +1010,13 @@ node && ! packet && {
 
 
 node && packet && {
-    if check "type -t curl" "Checking curl is installed" 1 "SKIP"; then
-        check "[ $(packet_req '' -w '%{http_code}' -o /dev/null ) = 200 ]" "Checking Packet token"
-        check "[ $(packet_req /projects/"$EDGE_PACKET_PROJECT" -w '%{http_code}' -o /dev/null) = 200 ]" "Checking Packet project"
-
-        if check "type -t jq" "Checking jq is installed" 1 "IGNORE  can't validate Packet parameters"; then
-             check "validate_packet facilities code $EDGE_PACKET_FACILITY /projects/$EDGE_PACKET_PROJECT" "Checking Packet facility"
-             check "validate_packet operating-systems slug $EDGE_PACKET_OS" "Checking Packet operating system"
-             check "validate_packet plans name ${EDGE_PACKET_PLAN}.x86 /projects/$EDGE_PACKET_PROJECT" "Checking Packet plan"
+    if check "type -t curl" "Checking curl is installed" 1 "IGNORE can't validate Packet parameters" "Install curl package first"; then
+        if check "type -t jq" "Checking jq is installed" 1 "IGNORE can't validate Packet parameters" "Install jq package first"; then
+            check "validate_packet projects id $EDGE_PACKET_PROJECT" "Checking Packet token and project"
+            check "validate_packet facilities code $EDGE_PACKET_FACILITY /projects/$EDGE_PACKET_PROJECT" "Checking Packet facility"
+            check "validate_packet operating-systems slug $EDGE_PACKET_OS" "Checking Packet operating system"
+            check "validate_packet plans name ${EDGE_PACKET_PLAN}.x86 /projects/$EDGE_PACKET_PROJECT" "Checking Packet plan"
+            check "validate_packet_plan_facility" "Checking packet facility and plan"
         fi
 
         check "curl -s -H \"${JSON_HEADERS}\" ${APPS_URL} \
@@ -1193,7 +1231,7 @@ EOF
 
 update_ssh_configs() {
 
-    local HOSTS=${1:$STAR_NET}
+    local HOSTS=${1:-$STAR_NET}
 
     # allow VM addresses to be re-used
     touch /var/lib/one/.ssh/config || return 1
@@ -1218,8 +1256,43 @@ EOF
     }
 }
 
+ensure_hostname_resolvable() {
+    set -e -o pipefail
+    local HOSTNAME
+    local IP
+
+    HOSTNAME=$(hostname)
+    IP=$(get_my_ip)
+
+    if getent hosts "$HOSTNAME" >/dev/null; then
+        return 0
+    fi
+
+    if [ ! -f /usr/share/augeas/lenses/oned.aug ]; then
+        echo "Missing oned.aug" >&2
+        return 1
+    fi
+
+    MATCH=$(augtool match '/files/etc/hosts/*/ipaddr' "$IP")
+
+    if [ -n "$MATCH" ]; then
+        # IP already in /etc/hosts
+        augtool -s set "/files/etc/hosts/*[ipaddr=\"$IP\"]/alias[.=\"$HOSTNAME\"] \"$HOSTNAME\""
+    else
+        # IP not in /etc/hosts yet
+        LAST=$(augtool ls '/files/etc/hosts' | tail -1 | awk -F/ '{print $1}')
+        LAST=$(( LAST + 1 ))
+        AUG_CMD=$(mktemp)
+        echo "set /files/etc/hosts/$LAST/ipaddr \"$IP\"" > "$AUG_CMD"
+        echo "set /files/etc/hosts/$LAST/canonical \"$HOSTNAME\"" >> "$AUG_CMD"
+        augtool -s -f "$AUG_CMD"
+        rm "$AUG_CMD"
+    fi
+    set +e
+}
+
 packet_conf_oned() {
-    set -e pipefail
+    set -e -o pipefail
     aug_set "MONITORING_INTERVAL_HOST" "1000"
     aug_set "MONITORING_INTERVAL_VM" "300"
     aug_set "IPAM_MAD/ARGUMENTS" '"-t 1 -i dummy,packet"'
@@ -1232,22 +1305,11 @@ packet_conf_oned() {
 }
 
 packet_conf_hooks() {
-    aug_set "VM_HOOK[NAME = '\"external_ip_running\"']/NAME" '"external_ip_running"'
-    aug_set "VM_HOOK[NAME = '\"external_ip_running\"']/ON" '"RUNNING"'
-    aug_set "VM_HOOK[NAME = '\"external_ip_running\"']/COMMAND" '"alias_ip/alias_ip.rb"'
-    aug_set "VM_HOOK[NAME = '\"external_ip_running\"']/ARGUMENTS" "\"\$ID \$TEMPLATE\""
-
-    aug_set "VM_HOOK[NAME = '\"alias_ip_hotplug\"']/NAME" '"alias_ip_hotplug"'
-    aug_set "VM_HOOK[NAME = '\"alias_ip_hotplug\"']/ON" '"CUSTOM"'
-    aug_set "VM_HOOK[NAME = '\"alias_ip_hotplug\"']/STATE" '"ACTIVE"'
-    aug_set "VM_HOOK[NAME = '\"alias_ip_hotplug\"']/LCM_STATE" '"HOTPLUG_NIC"'
-    aug_set "VM_HOOK[NAME = '\"alias_ip_hotplug\"']/COMMAND" '"alias_ip/alias_ip.rb"'
-    aug_set "VM_HOOK[NAME = '\"alias_ip_hotplug\"']/ARGUMENTS" "\"\$ID \$TEMPLATE\""
-
-    aug_set "VM_HOOK[NAME = '\"alias_ip_done\"']/NAME" '"alias_ip_done"'
-    aug_set "VM_HOOK[NAME = '\"alias_ip_done\"']/ON" '"DONE"'
-    aug_set "VM_HOOK[NAME = '\"alias_ip_done\"']/COMMAND" '"alias_ip/alias_ip.rb"'
-    aug_set "VM_HOOK[NAME = '\"alias_ip_done\"']/ARGUMENTS" "\"\$ID \$TEMPLATE\""
+    set -e -o pipefail
+    onehook create /usr/share/one/examples/alias_ip/done_hook
+    onehook create /usr/share/one/examples/alias_ip/hotplug_hook
+    onehook create /usr/share/one/examples/alias_ip/running_hook
+    set +e
 }
 
 get_next_packet_id() {
@@ -1362,7 +1424,6 @@ lxd && check "sed_subst \"\s*:command => '\\/bin\\/login'\" \"            :comma
 
 packet && {
     check "packet_conf_oned" "Applying packet changes to oned.conf"
-    check "packet_conf_hooks" "Configuring packet hooks in oned.conf"
     check "update_ssh_configs '*'" "Update ssh configs to accessing Packet hosts"
 }
 
@@ -1384,9 +1445,13 @@ frontend && {
     check "systemctl enable $ONE_SERVICES" "Enabling OpenNebula services"
     check "add_ssh_keys_to_oneadmin" "Add ssh key to oneadmin user"
     check "update_ssh_configs" "Update ssh configs to allow VM addresses reusig"
+    check "ensure_hostname_resolvable" "Ensure own hostname is resolvable"
+
 }
 
 check "one_is_ready" "Checking OpenNebula is working"
+
+packet && check "packet_conf_hooks" "Configuring packet hooks"
 
 packet && node && {
     check "packet_template" "Prepare packet template"
@@ -1577,23 +1642,23 @@ frontend && {
 }
 
 node && packet && {
-	PROVISION_IDS=$(get_provision_ids)
-	if [ -n "$PROVISION_IDS" ]; then
+    PROVISION_IDS=$(get_provision_ids)
+    if [ -n "$PROVISION_IDS" ]; then
 
-		title "Packet provisioned"
-		onehost list
+        title "Packet provisioned"
+        onehost list
 
-		echo ""
-		echo "To extend the setup by additional hypervisor on Packet run following command:"
-		echo "./minione --edge packet --node --edge-packet-token [<token>] --edge-packet-project [<project>]"
-		echo ""
+        echo ""
+        echo "To extend the setup by additional hypervisor on Packet run following command:"
+        echo "./minione --edge packet --node --edge-packet-token [<token>] --edge-packet-project [<project>]"
+        echo ""
 
         echo "To cleanup (delete resources in OpenNebula and Packet) run:"
 
-		for PROVISION_ID in $PROVISION_IDS; do
-			echo "oneprovision delete $PROVISION_ID --cleanup"
-		done
-	fi
+        for PROVISION_ID in $PROVISION_IDS; do
+            echo "oneprovision delete $PROVISION_ID --cleanup"
+        done
+    fi
 }
 
 exit 0

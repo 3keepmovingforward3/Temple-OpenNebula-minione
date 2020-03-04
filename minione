@@ -57,6 +57,7 @@ usage() {
     e "-f --force"                                "Skip non-fatal validation errors"
     e "--yes"                                     "Don't ask"
     e ""
+    e "--version [$VERSION]"                      "OpenNebula version to install"
     e "--lxd"                                     "Setup host to run LXD containers (KVM otherwise)"
     e "--frontend"                                "Install only frontend, skip node setup,"
     e ""                                          "no networking configuration"
@@ -167,7 +168,7 @@ while true ; do
         --preserve-user) DELETE_ONEADMIN="no"; shift;;
         --edge) EDGE="$2"; NETWORKING="no"; shift 2;;
         --edge-host-num) EDGE_HOST_NUM="$2"; shift 2;;
-        --edge-marketapp-name) EDGE_MARKET_APP_NAME="$2"; EDGE_DEFAULT_APP='no' shift 2;;
+        --edge-marketapp-name) EDGE_MARKET_APP_NAME="$2"; EDGE_DEFAULT_APP='no'; shift 2;;
         --edge-packet-token) EDGE_PACKET_TOKEN="$2"; shift 2;;
         --edge-packet-project) EDGE_PACKET_PROJECT="$2"; shift 2;;
         --edge-packet-facility) EDGE_PACKET_FACILITY="$2"; shift 2;;
@@ -259,7 +260,8 @@ get_distname_and_version() {
     elif [ -f /etc/SuSe-release ]; then
         DIST='SuSe'
     fi
-    [[ "${DIST}" =~ CentOS|RedHat|Debian ]] && VER=$(echo "$VER" | cut -c1)
+    [[ "${DIST}" =~ CentOS|RedHat ]] && VER=$(echo "$VER" | cut -c1)
+    [[ "${DIST}" =~ Debian ]] && VER=$(echo "$VER" | cut -d. -f1)
 
     echo "${DIST} ${VER}"
 }
@@ -1235,7 +1237,7 @@ update_ssh_configs() {
 
     # allow VM addresses to be re-used
     touch /var/lib/one/.ssh/config || return 1
-    grep -q "Host ${HOSTS}" /var/lib/one/.ssh/config || {
+    grep -q "Host ${HOSTS/\*/\\*}" /var/lib/one/.ssh/config || {
         cat >> /var/lib/one/.ssh/config << EOF || return 1
 Host ${HOSTS}
    StrictHostKeyChecking no
@@ -1246,7 +1248,7 @@ EOF
     }
 
     touch ~/.ssh/config || return 1
-    grep -q "Host ${HOSTS}" ~/.ssh/config || {
+    grep -q "Host ${HOSTS/\*/\\*}" ~/.ssh/config || {
         cat >> ~/.ssh/config << EOF || return 1
 Host ${HOSTS}
    StrictHostKeyChecking no
@@ -1306,9 +1308,9 @@ packet_conf_oned() {
 
 packet_conf_hooks() {
     set -e -o pipefail
-    onehook create /usr/share/one/examples/alias_ip/done_hook
-    onehook create /usr/share/one/examples/alias_ip/hotplug_hook
-    onehook create /usr/share/one/examples/alias_ip/running_hook
+    onehook show alias_ip_done    >/dev/null 2>&1 || onehook create /usr/share/one/examples/alias_ip/done_hook
+    onehook show alias_ip_hotplug >/dev/null 2>&1 || onehook create /usr/share/one/examples/alias_ip/hotplug_hook
+    onehook show alias_ip_running >/dev/null 2>&1 || onehook create /usr/share/one/examples/alias_ip/running_hook
     set +e
 }
 
@@ -1431,6 +1433,9 @@ frontend && {
     check "aug_set ONEGATE_ENDPOINT '\"http://${VNET_GATEWAY}:5030\"'" \
         "Switching OneGate endpoint in oned.conf"
 
+    check "sed_subst \":host: .*\" \":host: ${VNET_GATEWAY}\" \"/etc/one/onegate-server.conf\""\
+        "Switching OneGate endpoint in onegate-server.conf"
+
     check "aug_set SCHED_INTERVAL 10 /etc/one/sched.conf" \
         "Switching scheduler interval in oned.conf"
 
@@ -1454,6 +1459,7 @@ check "one_is_ready" "Checking OpenNebula is working"
 packet && check "packet_conf_hooks" "Configuring packet hooks"
 
 packet && node && {
+    check "systemctl restart opennebula" "Restarting OpenNebula"
     check "packet_template" "Prepare packet template"
     check "oneprovision validate $PACKET_TEMPLATE" "Checking packet template [$PACKET_TEMPLATE]"
     packet_provision
@@ -1620,7 +1626,7 @@ node && ! packet && {
 
 packet && node && {
     DS_ID=$(onedatastore list --csv -l ID,NAME,TYPE -f TYPE=img -f NAME=packet-"${PACKET_LAST_ID}"-default | awk -F, '{print $1}' | tail -1)
-    check "export_marketapp \"${EDGE_MARKET_APP_NAME}\" ${DS_ID} \"-${PACKET_LAST_ID}\"" \
+    check "export_marketapp \"${EDGE_MARKET_APP_NAME}\" ${DS_ID} \"-${EDGE_PACKET_FACILITY}-${PACKET_LAST_ID}\"" \
         "Exporting [${EDGE_MARKET_APP_NAME}] from Marketplace to local datastore"
     check "update_template $VM_TEMPLATE_ID" "Updating VM template"
 }
@@ -1634,7 +1640,7 @@ packet && node && {
 frontend && {
     title 'Report'
     echo "OpenNebula ${VERSION} was installed"
-    echo "Sunstone [the webui] is runninng on:"
+    echo "Sunstone [the webui] is running on:"
     echo "  http://$(get_my_ip)${PORT_STR}/"
     echo "Use following to login:"
     echo "  user: oneadmin"
